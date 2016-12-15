@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"internal/testenv"
 	"io"
 	"io/ioutil"
 	"reflect"
@@ -376,7 +375,7 @@ var deflateInflateStringTests = []deflateInflateStringTest{
 }
 
 func TestDeflateInflateString(t *testing.T) {
-	if testing.Short() && testenv.Builder() == "" {
+	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
 	for _, test := range deflateInflateStringTests {
