@@ -9,9 +9,12 @@ package flate
 
 import (
 	"bufio"
+	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"sync"
+	"unsafe"
 )
 
 const (
@@ -787,6 +790,14 @@ func NewReader(r io.Reader) io.ReadCloser {
 	f.codebits = new([numCodes]int)
 	f.step = (*decompressor).nextBlock
 	f.dict.init(maxMatchOffset, nil)
+	fmt.Fprintf(os.Stderr, "size of decompressor: %d\n", unsafe.Sizeof(f))
+	fmt.Fprintf(os.Stderr, "size of decompressor's r: %d\n", unsafe.Sizeof(f.r))
+	fmt.Fprintf(os.Stderr, "size of decompressor's bits: %d\n", unsafe.Sizeof(f.bits))
+	fmt.Fprintf(os.Stderr, "size of decompressor's codebits: %d\n", unsafe.Sizeof(f.codebits))
+	fmt.Fprintf(os.Stderr, "size of decompressor's dict: %d\n", unsafe.Sizeof(f.dict))
+	fmt.Fprintf(os.Stderr, "size of decompressor's toRead: %d\n", unsafe.Sizeof(f.toRead))
+	fmt.Fprintf(os.Stderr, "size of decompressor's h1: %d\n", unsafe.Sizeof(f.h1))
+	fmt.Fprintf(os.Stderr, "size of decompressor's h2: %d\n", unsafe.Sizeof(f.h2))
 	return &f
 }
 
