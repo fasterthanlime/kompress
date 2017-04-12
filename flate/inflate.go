@@ -9,12 +9,12 @@ package flate
 
 import (
 	"bufio"
-	"fmt"
+	"errors"
 	"io"
-	"os"
 	"strconv"
 	"sync"
-	"unsafe"
+
+	"os"
 )
 
 const (
@@ -42,6 +42,13 @@ func (e CorruptInputError) Error() string {
 type InternalError string
 
 func (e InternalError) Error() string { return "flate: internal error: " + string(e) }
+
+var (
+	// ReadyToSaveError is returned by Read() when a SaverReader is ready to emit a checkpoint
+	ReadyToSaveError = errors.New("ready to save")
+	// NotOnBoundaryError is returned by Save() when a SaverReader wasn't ready to emit a checkpoint
+	NotOnBoundaryError = errors.New("asked to save, but not on boundary")
+)
 
 // A ReadError reports an error encountered while reading input.
 //
@@ -270,6 +277,7 @@ type decompressor struct {
 	// Input source.
 	r       Reader
 	roffset int64
+	woffset int64
 
 	// Input bits, in top of b.
 	b  uint32
@@ -298,9 +306,14 @@ type decompressor struct {
 	hl, hd    *huffmanDecoder
 	copyLen   int
 	copyDist  int
+
+	// True if on boundary of two blocks
+	onBoundary bool
+	wantSave   bool
 }
 
 func (f *decompressor) nextBlock() {
+	f.onBoundary = false
 	for f.nb < 1+2 {
 		if f.err = f.moreBits(); f.err != nil {
 			return
@@ -337,6 +350,7 @@ func (f *decompressor) Read(b []byte) (int, error) {
 	for {
 		if len(f.toRead) > 0 {
 			n := copy(b, f.toRead)
+			f.woffset += int64(n)
 			f.toRead = f.toRead[n:]
 			if len(f.toRead) == 0 {
 				return n, f.err
@@ -345,6 +359,9 @@ func (f *decompressor) Read(b []byte) (int, error) {
 		}
 		if f.err != nil {
 			return 0, f.err
+		}
+		if f.onBoundary && f.wantSave {
+			return 0, ReadyToSaveError
 		}
 		f.step(f)
 	}
@@ -470,11 +487,15 @@ func (f *decompressor) readHuffman() error {
 	return nil
 }
 
+var lastHuffmanBlock int64 = 0
+
 // Decode a single Huffman block from f.
 // hl and hd are the Huffman states for the lit/length values
 // and the distance values, respectively. If hd == nil, using the
 // fixed distance encoding associated with fixed Huffman blocks.
 func (f *decompressor) huffmanBlock() {
+	lastHuffmanBlock = f.roffset
+
 	const (
 		stateInit = iota // Zero value must be stateInit
 		stateDict
@@ -686,6 +707,7 @@ func (f *decompressor) finishBlock() {
 		}
 		f.err = io.EOF
 	}
+	f.onBoundary = true
 	f.step = (*decompressor).nextBlock
 }
 
@@ -790,15 +812,96 @@ func NewReader(r io.Reader) io.ReadCloser {
 	f.codebits = new([numCodes]int)
 	f.step = (*decompressor).nextBlock
 	f.dict.init(maxMatchOffset, nil)
-	fmt.Fprintf(os.Stderr, "size of decompressor: %d\n", unsafe.Sizeof(f))
-	fmt.Fprintf(os.Stderr, "size of decompressor's r: %d\n", unsafe.Sizeof(f.r))
-	fmt.Fprintf(os.Stderr, "size of decompressor's bits: %d\n", unsafe.Sizeof(f.bits))
-	fmt.Fprintf(os.Stderr, "size of decompressor's codebits: %d\n", unsafe.Sizeof(f.codebits))
-	fmt.Fprintf(os.Stderr, "size of decompressor's dict: %d\n", unsafe.Sizeof(f.dict))
-	fmt.Fprintf(os.Stderr, "size of decompressor's toRead: %d\n", unsafe.Sizeof(f.toRead))
-	fmt.Fprintf(os.Stderr, "size of decompressor's h1: %d\n", unsafe.Sizeof(f.h1))
-	fmt.Fprintf(os.Stderr, "size of decompressor's h2: %d\n", unsafe.Sizeof(f.h2))
 	return &f
+}
+
+type Saver interface {
+	WantSave()
+	Save() (*Checkpoint, error)
+}
+
+// A Checkpoint allows resuming inflation from a certain point
+// in the compressed data stream
+type Checkpoint struct {
+	// Woffset is the offset into compressed data
+	Woffset int64
+	// Roffset is the offset into uncompressed data
+	Roffset int64
+	// B is the currently read bits
+	B uint32
+	// Nb is the number of bits currently read into B
+	Nb uint
+	// Hist keeps track of the uncompressed output written so far
+	Hist []byte
+}
+
+type SaverReader interface {
+	io.ReadCloser
+	Saver
+}
+
+type saverReader struct {
+	f *decompressor
+}
+
+func NewSaverReader(r io.Reader) SaverReader {
+	f := NewReader(r).(*decompressor)
+	return &saverReader{f}
+}
+
+func (sr *saverReader) Read(b []byte) (int, error) {
+	return sr.f.Read(b)
+}
+
+func (sr *saverReader) Close() error {
+	return sr.f.Close()
+}
+
+// WantSave signals the decompressor that it should stop
+// on the next block boundary to allow the consumer to perform a checkpoint
+func (sr *saverReader) WantSave() {
+	sr.f.wantSave = true
+}
+
+func (sr *saverReader) Save() (*Checkpoint, error) {
+	f := sr.f
+
+	if !f.onBoundary {
+		return nil, NotOnBoundaryError
+	}
+
+	res := &Checkpoint{
+		Roffset: f.roffset,
+		Woffset: f.woffset,
+		B:       f.b,
+		Nb:      f.nb,
+		Hist:    f.dict.hist,
+	}
+
+	return res, nil
+}
+
+// Resume starts decompressing again from a given checkpoint
+func (c *Checkpoint) Resume(r io.ReadSeeker) (SaverReader, error) {
+	fixedHuffmanDecoderInit()
+
+	_, err := r.Seek(c.Roffset, os.SEEK_SET)
+	if err != nil {
+		return nil, err
+	}
+
+	var f decompressor
+	f.r = makeReader(r)
+	f.bits = new([maxNumLit + maxNumDist]int)
+	f.codebits = new([numCodes]int)
+	f.step = (*decompressor).nextBlock
+
+	f.roffset = c.Roffset
+	f.woffset = c.Woffset
+	f.b = c.B
+	f.nb = c.Nb
+	f.dict.init(maxMatchOffset, c.Hist)
+	return &saverReader{&f}, nil
 }
 
 // NewReaderDict is like NewReader but initializes the reader
