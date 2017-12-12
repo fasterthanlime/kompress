@@ -11,13 +11,41 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestCheckpoints(t *testing.T) {
+type checkpointTestSpec struct {
+	numOps    int
+	threshold int64
+}
+
+func TestCheckpointsSmall(t *testing.T) {
+	runCheckpointTest(t, &checkpointTestSpec{
+		numOps:    16,
+		threshold: 128 * 1024,
+	})
+}
+
+func TestCheckpointsMedium(t *testing.T) {
+	runCheckpointTest(t, &checkpointTestSpec{
+		numOps:    32,
+		threshold: 512 * 1024,
+	})
+}
+
+func TestCheckpointsLarge(t *testing.T) {
+	runCheckpointTest(t, &checkpointTestSpec{
+		numOps:    128,
+		threshold: 1 * 1024 * 1024,
+	})
+}
+
+func runCheckpointTest(t *testing.T, cts *checkpointTestSpec) {
 	gen := rand.New(rand.NewSource(0xfaadbeef))
 	inputBuf := new(bytes.Buffer)
 
+	log.Printf("running test with %d ops, threshold %s", cts.numOps, humanize.IBytes(uint64(cts.threshold)))
+
 	var oldSeqs [][]byte
 
-	for i := 0; i < 128; i++ {
+	for i := 0; i < cts.numOps; i++ {
 		var seq []byte
 
 		if gen.Intn(100) >= 80 {
@@ -39,7 +67,6 @@ func TestCheckpoints(t *testing.T) {
 		}
 	}
 
-	log.Printf("uncompressedBuf length: %s", humanize.IBytes(uint64(inputBuf.Len())))
 	inputData := inputBuf.Bytes()
 
 	compressedBuf := new(bytes.Buffer)
@@ -52,7 +79,7 @@ func TestCheckpoints(t *testing.T) {
 	err = w.Close()
 	assert.NoError(t, err)
 
-	log.Printf("  compressedBuf length: %s", humanize.IBytes(uint64(compressedBuf.Len())))
+	log.Printf("compressed to %s / %s", humanize.IBytes(uint64(compressedBuf.Len())), humanize.IBytes(uint64(len(inputData))))
 
 	compressedData := compressedBuf.Bytes()
 	decompressedBuf := new(bytes.Buffer)
@@ -64,7 +91,6 @@ func TestCheckpoints(t *testing.T) {
 
 	var checkpoint *Checkpoint
 	var readBytes int64
-	var threshold int64 = 256 * 1024
 	for {
 		n, err := sr.Read(buf)
 		if n > 0 {
@@ -80,26 +106,18 @@ func TestCheckpoints(t *testing.T) {
 		if err != nil {
 			if err == io.EOF {
 				// cool!
-				log.Printf("got EOF!")
 				break
 			} else if err == ReadyToSaveError {
 				var saveErr error
 				checkpoint, saveErr = sr.Save()
 				assert.NoError(t, saveErr)
 
-				log.Printf("Made checkpoint at byte %d", checkpoint.Roffset)
-				sr1 := sr.(*saverReader)
+				log.Printf("Made checkpoint at %s", humanize.IBytes(uint64(checkpoint.Roffset)))
 
 				var resumeErr error
 				bytesReader = bytes.NewReader(compressedData)
 				sr, resumeErr = checkpoint.Resume(bytesReader)
 				assert.NoError(t, resumeErr)
-
-				sr2 := sr.(*saverReader)
-				log.Printf("rdPos: %v => %v", sr1.f.dict.rdPos, sr2.f.dict.rdPos)
-				log.Printf("wrPos: %v => %v", sr1.f.dict.wrPos, sr2.f.dict.wrPos)
-				log.Printf("full: %v => %v", sr1.f.dict.full, sr2.f.dict.full)
-				log.Printf("len(hist): %v => %v", len(sr1.f.dict.hist), len(sr2.f.dict.hist))
 			} else {
 				offset, _ := bytesReader.Seek(0, io.SeekCurrent)
 				log.Printf("Got unrecoverable error at byte %d/%d", offset, len(compressedData))
@@ -108,7 +126,7 @@ func TestCheckpoints(t *testing.T) {
 			}
 		}
 
-		if readBytes > threshold {
+		if readBytes > cts.threshold {
 			sr.WantSave()
 			readBytes = 0
 		}
