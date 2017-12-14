@@ -6,13 +6,14 @@ package gzip
 
 import (
 	"bytes"
-	"compress/flate"
 	"io"
 	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/itchio/kompress/flate"
 )
 
 type gunzipTest struct {

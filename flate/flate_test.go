@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 
 // This test tests some internals of the flate package.
-// The tests in package compress/gzip serve as the
+// The tests in package github.com/itchio/kompress/gzip serve as the
 // end-to-end test of the decompressor.
 
 package flate

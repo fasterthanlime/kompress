@@ -6,12 +6,13 @@ package gzip_test
 
 import (
 	"bytes"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"time"
+
+	"github.com/itchio/kompress/gzip"
 )
 
 func Example_writerReader() {

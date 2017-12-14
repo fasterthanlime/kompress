@@ -5,12 +5,13 @@
 package gzip
 
 import (
-	"compress/flate"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"time"
+
+	"github.com/itchio/kompress/flate"
 )
 
 // These constants are copied from the flate package, so that code that imports

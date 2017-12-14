@@ -8,12 +8,13 @@ package gzip
 
 import (
 	"bufio"
-	"compress/flate"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"io"
 	"time"
+
+	"github.com/itchio/kompress/flate"
 )
 
 const (

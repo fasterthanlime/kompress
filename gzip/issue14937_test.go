@@ -1,7 +1,6 @@
 package gzip
 
 import (
-	"internal/testenv"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,12 +14,6 @@ import (
 //
 // See https://golang.org/issue/14937.
 func TestGZIPFilesHaveZeroMTimes(t *testing.T) {
-	// To avoid spurious false positives due to untracked GZIP files that
-	// may be in the user's GOROOT (Issue 18604), we only run this test on
-	// the builders, which should have a clean checkout of the tree.
-	if testenv.Builder() == "" {
-		t.Skip("skipping test on non-builder")
-	}
 	goroot, err := filepath.EvalSymlinks(runtime.GOROOT())
 	if err != nil {
 		t.Fatal("error evaluating GOROOT: ", err)
