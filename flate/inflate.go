@@ -889,13 +889,8 @@ func (sr *saverReader) Save() (*Checkpoint, error) {
 }
 
 // Resume starts decompressing again from a given checkpoint
-func (c *Checkpoint) Resume(r io.ReadSeeker) (SaverReader, error) {
+func (c *Checkpoint) Resume(r io.Reader) (SaverReader, error) {
 	fixedHuffmanDecoderInit()
-
-	_, err := r.Seek(c.Roffset, io.SeekStart)
-	if err != nil {
-		return nil, err
-	}
 
 	var f decompressor
 	f.r = makeReader(r)

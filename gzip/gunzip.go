@@ -73,7 +73,8 @@ type Header struct {
 // returned by Read as tentative until they receive the io.EOF
 // marking the end of the data.
 type Reader struct {
-	Header       // valid after NewReader or Reader.Reset
+	Header           // valid after NewReader or Reader.Reset
+	headerSize   int // how many bytes do we need to skip to resume reading?
 	r            flate.Reader
 	decompressor flate.SaverReader
 	digest       uint32 // CRC-32, IEEE polynomial (section 8)
@@ -106,7 +107,9 @@ type Saver interface {
 // A Checkpoint allows resuming decompression from a certain point
 // in the compressed data stream
 type Checkpoint struct {
+	Roffset         int64
 	FlateCheckpoint *flate.Checkpoint
+	HeaderSize      int
 	Header          Header
 	Digest          uint32
 	Size            uint32
@@ -151,24 +154,28 @@ func (sr *saverReader) Save() (*Checkpoint, error) {
 	}
 
 	res := &Checkpoint{
+		Roffset:         flateCheckpoint.Roffset + int64(f.headerSize),
 		FlateCheckpoint: flateCheckpoint,
 		Digest:          f.digest,
 		Header:          f.Header,
+		HeaderSize:      f.headerSize,
 		Size:            f.size,
 	}
 	return res, nil
 }
 
 // Resume starts decompressing again from a given checkpoint
-func (c *Checkpoint) Resume(r io.ReadSeeker) (SaverReader, error) {
+func (c *Checkpoint) Resume(r io.Reader) (SaverReader, error) {
 	decompressor, err := c.FlateCheckpoint.Resume(r)
 	if err != nil {
 		return nil, err
 	}
 
 	f := new(Reader)
+	f.r = makeReader(r)
 	f.decompressor = decompressor
 	f.multistream = true
+	f.headerSize = c.HeaderSize
 	f.Header = c.Header
 	f.digest = c.Digest
 	f.size = c.Size
@@ -182,14 +189,17 @@ func (z *Reader) Reset(r io.Reader) error {
 	*z = Reader{
 		decompressor: z.decompressor,
 		multistream:  true,
-	}
-	if rr, ok := r.(flate.Reader); ok {
-		z.r = rr
-	} else {
-		z.r = bufio.NewReader(r)
+		r:            makeReader(r),
 	}
 	z.Header, z.err = z.readHeader()
 	return z.err
+}
+
+func makeReader(r io.Reader) flate.Reader {
+	if rr, ok := r.(flate.Reader); ok {
+		return rr
+	}
+	return bufio.NewReader(r)
 }
 
 // Multistream controls whether the reader supports multistream files.
@@ -216,7 +226,7 @@ func (z *Reader) Multistream(ok bool) {
 // It treats the bytes read as being encoded as ISO 8859-1 (Latin-1) and
 // will output a string encoded using UTF-8.
 // This method always updates z.digest with the data read.
-func (z *Reader) readString() (string, error) {
+func (z *Reader) readString(r *countingReader) (string, error) {
 	var err error
 	needConv := false
 	for i := 0; ; i++ {
@@ -250,7 +260,11 @@ func (z *Reader) readString() (string, error) {
 // readHeader reads the GZIP header according to section 2.3.1.
 // This method does not set z.err.
 func (z *Reader) readHeader() (hdr Header, err error) {
-	if _, err = io.ReadFull(z.r, z.buf[:10]); err != nil {
+	r := &countingReader{
+		r: z.r,
+	}
+
+	if _, err = io.ReadFull(r, z.buf[:10]); err != nil {
 		// RFC 1952, section 2.2, says the following:
 		//	A gzip file consists of a series of "members" (compressed data sets).
 		//
@@ -274,12 +288,12 @@ func (z *Reader) readHeader() (hdr Header, err error) {
 	z.digest = crc32.ChecksumIEEE(z.buf[:10])
 
 	if flg&flagExtra != 0 {
-		if _, err = io.ReadFull(z.r, z.buf[:2]); err != nil {
+		if _, err = io.ReadFull(r, z.buf[:2]); err != nil {
 			return hdr, noEOF(err)
 		}
 		z.digest = crc32.Update(z.digest, crc32.IEEETable, z.buf[:2])
 		data := make([]byte, le.Uint16(z.buf[:2]))
-		if _, err = io.ReadFull(z.r, data); err != nil {
+		if _, err = io.ReadFull(r, data); err != nil {
 			return hdr, noEOF(err)
 		}
 		z.digest = crc32.Update(z.digest, crc32.IEEETable, data)
@@ -288,21 +302,21 @@ func (z *Reader) readHeader() (hdr Header, err error) {
 
 	var s string
 	if flg&flagName != 0 {
-		if s, err = z.readString(); err != nil {
+		if s, err = z.readString(r); err != nil {
 			return hdr, err
 		}
 		hdr.Name = s
 	}
 
 	if flg&flagComment != 0 {
-		if s, err = z.readString(); err != nil {
+		if s, err = z.readString(r); err != nil {
 			return hdr, err
 		}
 		hdr.Comment = s
 	}
 
 	if flg&flagHdrCrc != 0 {
-		if _, err = io.ReadFull(z.r, z.buf[:2]); err != nil {
+		if _, err = io.ReadFull(r, z.buf[:2]); err != nil {
 			return hdr, noEOF(err)
 		}
 		digest := le.Uint16(z.buf[:2])
@@ -311,6 +325,7 @@ func (z *Reader) readHeader() (hdr Header, err error) {
 		}
 	}
 
+	z.headerSize = r.Count()
 	z.digest = 0
 	z.decompressor = flate.NewSaverReader(z.r)
 	return hdr, nil
@@ -364,3 +379,31 @@ func (z *Reader) Read(p []byte) (n int, err error) {
 // In order for the GZIP checksum to be verified, the reader must be
 // fully consumed until the io.EOF.
 func (z *Reader) Close() error { return z.decompressor.Close() }
+
+type countingReader struct {
+	r flate.Reader
+
+	count int
+}
+
+var _ flate.Reader = (*countingReader)(nil)
+
+func (cr *countingReader) Read(buf []byte) (int, error) {
+	n, err := cr.r.Read(buf)
+	cr.count += n
+	return n, err
+}
+
+func (cr *countingReader) ReadByte() (byte, error) {
+	ret, err := cr.r.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+
+	cr.count++
+	return ret, nil
+}
+
+func (cr *countingReader) Count() int {
+	return cr.count
+}
