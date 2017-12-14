@@ -75,7 +75,7 @@ type Header struct {
 type Reader struct {
 	Header       // valid after NewReader or Reader.Reset
 	r            flate.Reader
-	decompressor io.ReadCloser
+	decompressor flate.SaverReader
 	digest       uint32 // CRC-32, IEEE polynomial (section 8)
 	size         uint32 // Uncompressed size (section 2.3.1)
 	buf          [512]byte
@@ -96,6 +96,83 @@ func NewReader(r io.Reader) (*Reader, error) {
 		return nil, err
 	}
 	return z, nil
+}
+
+type Saver interface {
+	WantSave()
+	Save() (*Checkpoint, error)
+}
+
+// A Checkpoint allows resuming decompression from a certain point
+// in the compressed data stream
+type Checkpoint struct {
+	FlateCheckpoint *flate.Checkpoint
+	Header          Header
+	Digest          uint32
+	Size            uint32
+}
+
+type SaverReader interface {
+	io.ReadCloser
+	Saver
+}
+
+type saverReader struct {
+	f *Reader
+}
+
+func NewSaverReader(r io.Reader) (SaverReader, error) {
+	f, err := NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return &saverReader{f}, nil
+}
+
+func (sr *saverReader) Read(b []byte) (int, error) {
+	return sr.f.Read(b)
+}
+
+func (sr *saverReader) Close() error {
+	return sr.f.Close()
+}
+
+func (sr *saverReader) WantSave() {
+	sr.f.decompressor.WantSave()
+}
+
+func (sr *saverReader) Save() (*Checkpoint, error) {
+	f := sr.f
+
+	flateCheckpoint, err := f.decompressor.Save()
+	if err != nil {
+		return nil, err
+	}
+
+	res := &Checkpoint{
+		FlateCheckpoint: flateCheckpoint,
+		Digest:          f.digest,
+		Header:          f.Header,
+		Size:            f.size,
+	}
+	return res, nil
+}
+
+// Resume starts decompressing again from a given checkpoint
+func (c *Checkpoint) Resume(r io.ReadSeeker) (SaverReader, error) {
+	decompressor, err := c.FlateCheckpoint.Resume(r)
+	if err != nil {
+		return nil, err
+	}
+
+	f := new(Reader)
+	f.decompressor = decompressor
+	f.multistream = true
+	f.Header = c.Header
+	f.digest = c.Digest
+	f.size = c.Size
+	return &saverReader{f}, nil
 }
 
 // Reset discards the Reader z's state and makes it equivalent to the
@@ -235,11 +312,7 @@ func (z *Reader) readHeader() (hdr Header, err error) {
 	}
 
 	z.digest = 0
-	if z.decompressor == nil {
-		z.decompressor = flate.NewReader(z.r)
-	} else {
-		z.decompressor.(flate.Resetter).Reset(z.r, nil)
-	}
+	z.decompressor = flate.NewSaverReader(z.r)
 	return hdr, nil
 }
 
