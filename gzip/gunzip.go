@@ -226,14 +226,14 @@ func (z *Reader) Multistream(ok bool) {
 // It treats the bytes read as being encoded as ISO 8859-1 (Latin-1) and
 // will output a string encoded using UTF-8.
 // This method always updates z.digest with the data read.
-func (z *Reader) readString(r *countingReader) (string, error) {
+func (z *Reader) readString(r flate.Reader) (string, error) {
 	var err error
 	needConv := false
 	for i := 0; ; i++ {
 		if i >= len(z.buf) {
 			return "", ErrHeader
 		}
-		z.buf[i], err = z.r.ReadByte()
+		z.buf[i], err = r.ReadByte()
 		if err != nil {
 			return "", err
 		}

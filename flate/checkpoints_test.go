@@ -115,7 +115,7 @@ func runCheckpointTest(t *testing.T, cts *checkpointTestSpec) {
 				log.Printf("Made checkpoint at %s", humanize.IBytes(uint64(checkpoint.Roffset)))
 
 				var resumeErr error
-				bytesReader = bytes.NewReader(compressedData)
+				bytesReader = bytes.NewReader(compressedData[checkpoint.Roffset:])
 				sr, resumeErr = checkpoint.Resume(bytesReader)
 				assert.NoError(t, resumeErr)
 			} else {
