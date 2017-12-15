@@ -6,6 +6,7 @@ This is a fork of Google go's following packages:
 
   * `compress/flate` (taken from go 1.9.2 distribution)
   * `compress/gzip` (taken from go 1.9.2 distribution)
+  * `compress/bzip2` (taken from go 1.9.2 distribution)
 
 ## License
 
