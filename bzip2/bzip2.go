@@ -5,7 +5,10 @@
 // Package bzip2 implements bzip2 decompression.
 package bzip2
 
-import "io"
+import (
+	"errors"
+	"io"
+)
 
 // There's no RFC for bzip2. I used the Wikipedia page for reference and a lot
 // of guessing: http://en.wikipedia.org/wiki/Bzip2
@@ -19,6 +22,13 @@ type StructuralError string
 func (s StructuralError) Error() string {
 	return "bzip2 data invalid: " + string(s)
 }
+
+var (
+	// ReadyToSaveError is returned by Read() when a SaverReader is ready to emit a checkpoint
+	ReadyToSaveError = errors.New("ready to save")
+	// NotOnBoundaryError is returned by Save() when a SaverReader wasn't ready to emit a checkpoint
+	NotOnBoundaryError = errors.New("asked to save, but not on boundary")
+)
 
 // A reader decompresses bzip2 compressed data.
 type reader struct {
@@ -38,6 +48,40 @@ type reader struct {
 	lastByte    int      // the last byte value seen.
 	byteRepeats uint     // the number of repeats of lastByte seen.
 	repeats     uint     // the number of copies of lastByte to output.
+
+	onBoundary bool
+	wantSave   bool
+
+	roffset int64
+	woffset int64
+
+	resuming bool
+}
+
+type Checkpoint struct {
+	Woffset int64
+	Roffset int64
+
+	BlockSize int
+	FileCRC   uint32
+	TT        []uint32
+
+	BitReaderN uint64
+	BitReaderB uint
+}
+
+type Saver interface {
+	WantSave()
+	Save() (*Checkpoint, error)
+}
+
+type SaverReader interface {
+	io.ReadCloser
+	Saver
+}
+
+type saverReader struct {
+	f *reader
 }
 
 // NewReader returns an io.Reader which decompresses bzip2 data from r.
@@ -47,6 +91,70 @@ func NewReader(r io.Reader) io.Reader {
 	bz2 := new(reader)
 	bz2.br = newBitReader(r)
 	return bz2
+}
+
+func NewSaverReader(r io.Reader) saverReader {
+	bz2 := new(reader)
+	bz2.br = newBitReader(r)
+	return saverReader{f: bz2}
+}
+
+func (sr saverReader) Read(b []byte) (int, error) {
+	return sr.f.Read(b)
+}
+
+func (sr saverReader) Close() error {
+	// nop
+	return nil
+}
+
+// WantSave signals the decompressor that it should stop
+// on the next block boundary to allow the consumer to perform a checkpoint
+func (sr saverReader) WantSave() {
+	sr.f.wantSave = true
+}
+
+func (sr saverReader) Save() (*Checkpoint, error) {
+	f := sr.f
+
+	if !f.onBoundary {
+		return nil, NotOnBoundaryError
+	}
+
+	res := &Checkpoint{
+		Roffset:    f.roffset,
+		Woffset:    f.woffset,
+		FileCRC:    f.fileCRC,
+		BlockSize:  f.blockSize,
+		BitReaderB: f.br.bits,
+		BitReaderN: f.br.n,
+		TT:         f.tt,
+	}
+
+	return res, nil
+}
+
+// Resume starts decompressing again from a given checkpoint
+func (c *Checkpoint) Resume(r io.Reader) (SaverReader, error) {
+	var f reader
+
+	f.roffset = c.Roffset
+	f.woffset = c.Woffset
+
+	f.blockSize = c.BlockSize
+	f.fileCRC = c.FileCRC
+
+	f.br = newBitReader(r)
+	f.br.bits = c.BitReaderB
+	f.br.n = c.BitReaderN
+	f.br.r.count = c.Roffset
+	f.setupDone = true
+
+	f.tt = c.TT
+
+	f.resuming = true
+
+	return saverReader{&f}, nil
 }
 
 const bzip2FileMagic = 0x425a // "BZ"
@@ -79,6 +187,7 @@ func (bz2 *reader) setup(needMagic bool) error {
 	if bz2.blockSize > len(bz2.tt) {
 		bz2.tt = make([]uint32, bz2.blockSize)
 	}
+	bz2.resuming = false
 	return nil
 }
 
@@ -162,19 +271,32 @@ func (bz2 *reader) readFromBlock(buf []byte) int {
 
 func (bz2 *reader) read(buf []byte) (int, error) {
 	for {
-		n := bz2.readFromBlock(buf)
-		if n > 0 {
-			bz2.blockCRC = updateCRC(bz2.blockCRC, buf[:n])
-			return n, nil
-		}
+		if !bz2.resuming {
+			n := bz2.readFromBlock(buf)
+			if n > 0 {
+				bz2.blockCRC = updateCRC(bz2.blockCRC, buf[:n])
+				bz2.woffset += int64(n)
+				return n, nil
+			}
 
-		// End of block. Check CRC.
-		if bz2.blockCRC != bz2.wantBlockCRC {
-			bz2.br.err = StructuralError("block checksum mismatch")
-			return 0, bz2.br.err
+			// End of block. Check CRC.
+			if bz2.blockCRC != bz2.wantBlockCRC {
+				bz2.br.err = StructuralError("block checksum mismatch")
+				return 0, bz2.br.err
+			}
 		}
 
 		// Find next block.
+
+		if bz2.wantSave {
+			bz2.onBoundary = true
+			bz2.roffset = bz2.br.r.count
+			return 0, ReadyToSaveError
+		}
+
+		bz2.onBoundary = false
+		bz2.resuming = false
+
 		br := &bz2.br
 		switch br.ReadBits64(48) {
 		default:

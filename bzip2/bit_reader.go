@@ -14,7 +14,7 @@ import (
 // because the error handling was verbose. Instead, any error is kept and can
 // be checked afterwards.
 type bitReader struct {
-	r    io.ByteReader
+	r    countingByteReader
 	n    uint64
 	bits uint
 	err  error
@@ -27,7 +27,7 @@ func newBitReader(r io.Reader) bitReader {
 	if !ok {
 		byter = bufio.NewReader(r)
 	}
-	return bitReader{r: byter}
+	return bitReader{r: countingByteReader{r: byter}}
 }
 
 // ReadBits64 reads the given number of bits and returns them in the
@@ -79,4 +79,20 @@ func (br *bitReader) ReadBit() bool {
 
 func (br *bitReader) Err() error {
 	return br.err
+}
+
+
+// counting reader
+
+type countingByteReader struct {
+	r     io.ByteReader
+	count int64
+}
+
+var _ io.ByteReader = (*countingByteReader)(nil)
+
+func (cr *countingByteReader) ReadByte() (byte, error) {
+	b, err := cr.r.ReadByte()
+	cr.count++
+	return b, err
 }
