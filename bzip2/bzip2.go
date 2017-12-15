@@ -64,7 +64,6 @@ type Checkpoint struct {
 
 	BlockSize int
 	FileCRC   uint32
-	TT        []uint32
 
 	BitReaderN uint64
 	BitReaderB uint
@@ -128,7 +127,6 @@ func (sr saverReader) Save() (*Checkpoint, error) {
 		BlockSize:  f.blockSize,
 		BitReaderB: f.br.bits,
 		BitReaderN: f.br.n,
-		TT:         f.tt,
 	}
 
 	return res, nil
@@ -150,7 +148,7 @@ func (c *Checkpoint) Resume(r io.Reader) (SaverReader, error) {
 	f.br.r.count = c.Roffset
 	f.setupDone = true
 
-	f.tt = c.TT
+	f.tt = make([]uint32, f.blockSize)
 
 	f.resuming = true
 
