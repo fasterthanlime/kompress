@@ -134,7 +134,12 @@ func NewSaverReader(r io.Reader) (SaverReader, error) {
 }
 
 func (sr *saverReader) Read(b []byte) (int, error) {
-	return sr.f.Read(b)
+	n, err := sr.f.Read(b)
+	if err == flate.ReadyToSaveError {
+		// don't save that error
+		sr.f.err = nil
+	}
+	return n, err
 }
 
 func (sr *saverReader) Close() error {

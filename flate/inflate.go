@@ -866,12 +866,12 @@ func (sr *saverReader) WantSave() {
 
 func (sr *saverReader) Save() (*Checkpoint, error) {
 	f := sr.f
+	f.wantSave = false
+	f.err = nil
 
 	if !f.onBoundary {
 		return nil, NotOnBoundaryError
 	}
-
-	f.wantSave = false
 
 	res := &Checkpoint{
 		Roffset: f.roffset,

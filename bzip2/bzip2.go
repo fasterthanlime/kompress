@@ -287,6 +287,7 @@ func (bz2 *reader) read(buf []byte) (int, error) {
 		// Find next block.
 
 		if bz2.wantSave {
+			bz2.wantSave = false
 			bz2.onBoundary = true
 			bz2.roffset = bz2.br.r.count
 			return 0, ReadyToSaveError
